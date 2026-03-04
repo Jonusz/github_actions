@@ -35,8 +35,8 @@ jobs:
         with:
           # This looks for labels like 'bump:major', 'bump:minor', or 'bump:patch'
           # If no label is found, it defaults to a patch (0.0.X)
-          bump: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          github_token: ${{ secrets.RELEASE_TOKEN }}
+          bump: ${{ join(github.event.pull_request.labels.*.name, ',') || 'patch'}}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -45,4 +45,4 @@ jobs:
           name: Release ${{ steps.bump_logic.outputs.version }}
           generate_release_notes: true  # Automatically writes the list of changes
         env:
-          github_token: ${{ secrets.RELEASE_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
