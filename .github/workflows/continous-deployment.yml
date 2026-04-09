@@ -1,0 +1,107 @@
+---
+name: Continuous Deployment
+
+on:
+  push:
+    # Run workflow every time something is pushed to the main branch
+    branches:
+      - main
+  # allow manual triggers for now too
+  workflow_dispatch:
+    manual: true
+
+# Remember to set the following secrets in your repository's settings:
+# DOCKER_USERNAME
+# DOCKER_PASSWORD
+# SSH_USER
+# SSH_KEY
+# SSH_HOST
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/web/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/webminitwitimage:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/webminitwitimage:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/webminitwitimage:buildcache,mode=max
+
+      - name: Build and push bot image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./new/bot
+          file: ./new/bot/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/discordbotimage:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/discordbotimage:botbuildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/discordbotimage:botbuildcache,mode=max
+
+      - name: Build and push rsyslog image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./monitoring/rsyslog
+          file: ./monitoring/rsyslog/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/central-rsyslog:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/central-rsyslog:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/central-rsyslog:buildcache,mode=max
+
+#      - name: Test minitwit
+#        run: |
+#          docker build -t $DOCKER_USERNAME/minitwittestimage -f Dockerfile-minitwit-tests .
+#          yes 2>/dev/null | docker compose up -d
+#          docker run --rm --network=itu-minitwit-network $DOCKER_USERNAME/minitwittestimage
+#        env:
+#          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh/
+          echo "$SSH_KEY" > ~/.ssh/ssh_key_golang_minitwit
+          chmod 600 ~/.ssh/ssh_key_golang_minitwit
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+
+      - name: Deploy to server
+        run: |
+          # 1. Create the .env file with ALL required variables
+          echo "DOCKER_USERNAME=$DOCKER_USERNAME" >> .env
+          echo "DISCORD_TOKEN=$DISCORD_TOKEN" >> .env
+          echo "GRAFANA_ADMIN_USER=$GRAFANA_ADMIN_USER" >> .env
+          echo "GRAFANA_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD" >> .env
+          echo "DIGITAL_OCEAN_DATABASE_USERNAME=$DIGITAL_OCEAN_DATABASE_USERNAME" >> .env
+          echo "DIGITAL_OCEAN_DATABASE_PWD=$DIGITAL_OCEAN_DATABASE_PWD" >> .env
+          echo "DIGITAL_OCEAN_DATABASE_NAME=$DIGITAL_OCEAN_DATABASE_NAME" >> .env
+          echo "MONGO_URI='mongodb+srv://${DIGITAL_OCEAN_DATABASE_USERNAME}:${DIGITAL_OCEAN_DATABASE_PWD}@minitwit-dbserver-1-77977c42.mongo.ondigitalocean.com/${DIGITAL_OCEAN_DATABASE_NAME}?tls=true&authSource=admin'" >> .env
+          
+          scp -i ~/.ssh/ssh_key_golang_minitwit -o StrictHostKeyChecking=no -r remote_files/docker-stack.yml remote_files/deploy.sh remote_files/prometheus.yml query-logs.sh monitoring .env $SSH_USER@$SSH_HOST:/minitwit/
+          
+          ssh $SSH_USER@$SSH_HOST -i ~/.ssh/ssh_key_golang_minitwit -o StrictHostKeyChecking=no 'chmod +x /minitwit/deploy.sh && cd /minitwit && ./deploy.sh'
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GRAFANA_ADMIN_USER: ${{ secrets.GRAFANA_ADMIN_USER }}
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          DIGITAL_OCEAN_DATABASE_USERNAME: ${{ secrets.DIGITAL_OCEAN_DATABASE_USERNAME }}
+          DIGITAL_OCEAN_DATABASE_PWD: ${{ secrets.DIGITAL_OCEAN_DATABASE_PWD }}
+          DIGITAL_OCEAN_DATABASE_NAME: ${{ secrets.DIGITAL_OCEAN_DATABASE_NAME }}

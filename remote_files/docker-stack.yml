@@ -1,0 +1,145 @@
+x-syslog-logging: &syslog_logging
+  driver: syslog
+  options:
+    syslog-address: ${SYSLOG_ADDRESS:-udp://127.0.0.1:5514}
+    tag: "{{.Name}}"
+    syslog-format: rfc5424micro
+
+services:
+  webserver:
+    image: ${DOCKER_USERNAME}/webminitwitimage:latest
+    ports:
+      - "80:8080"
+    environment:
+      - MONGO_URI=${MONGO_URI}
+#    volumes:
+#      - /minitwit/new/logs:/usr/src/app/logs
+    networks:
+      - minitwit-network
+    logging: *syslog_logging
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      replicas: 3 # Scale  web application
+      # -update_config-  ensures rolling updates. Which means, if we push a new version of the app and update ,
+      # to the stack, Swarm will execute a rolling update to ensure app does not go offline.
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    networks:
+      - minitwit-network
+    volumes:
+      - /minitwit/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_cloud_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    logging: *syslog_logging
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager # Keep data tied to this specific node
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+    networks:
+      - minitwit-network
+    volumes:
+      - grafana_cloud_data:/var/lib/grafana
+      - /minitwit/monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - /minitwit/monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    logging: *syslog_logging
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - minitwit-network
+    logging: *syslog_logging
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
+  promtail:
+    image: grafana/promtail:latest
+    volumes:
+      - rsyslog_data:/var/log/remote:ro
+      - /minitwit/monitoring/promtail/config.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - minitwit-network
+    logging: *syslog_logging
+    deploy:
+      mode: global # Runs on every node to collect logs from all servers
+
+  discordbot:
+    image: ${DOCKER_USERNAME}/discordbotimage:latest
+    environment:
+      - MONGO_URI=${MONGO_URI}
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+    networks:
+      - minitwit-network
+    logging: *syslog_logging
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 1
+        order: stop-first
+
+  central-rsyslog:
+    image: ${DOCKER_USERNAME}/central-rsyslog:latest
+    environment:
+      - RSYSLOG_RETENTION_DAYS=7
+      - RSYSLOG_CLEANUP_INTERVAL_SECONDS=3600
+    ports:
+      - target: 514
+        published: 5514
+        protocol: tcp
+        mode: host
+      - target: 514
+        published: 5514
+        protocol: udp
+        mode: host
+    networks:
+      - minitwit-network
+    volumes:
+      - rsyslog_data:/var/log/remote
+    deploy:
+      mode: global # Ensures a syslog listener runs on every worker node
+
+networks:
+  minitwit-network:
+    driver: overlay # Required for Swarm to communicate across Droplets
+
+volumes:
+  prometheus_cloud_data:
+    external: true
+    name: minitwit_prometheus_cloud_data
+
+  grafana_cloud_data:
+    external: true
+    name: minitwit_grafana_cloud_data
+
+  rsyslog_data:
