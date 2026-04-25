@@ -1,7 +1,7 @@
 # ==========================================
 # STAGE 1: Build the app
 # ==========================================
-FROM golang:1.25 AS builder
+FROM golang:1.25.9 AS builder
 WORKDIR /usr/src/app
 
 # Cache dependencies first (Assuming go.mod is inside 'new/')
@@ -17,13 +17,15 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o minitwit-server main.g
 # ==========================================
 # STAGE 2: Create the production image
 # ==========================================
-FROM alpine:3.19
+FROM alpine:3.23
 # Install CA certificates and set up a non-root user
 # hadolint ignore=DL3018
 RUN apk --no-cache add ca-certificates && \
     addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /usr/src/app
+
+RUN mkdir -p /app && chown -R appuser:appgroup /app /usr/src/app
 
 # Change ownership to the non-root user
 COPY --from=builder --chown=appuser:appgroup /usr/src/app/minitwit-server .

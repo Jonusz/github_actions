@@ -18,19 +18,24 @@ REQUIRED_VARS=(
 
 for VAR in "${REQUIRED_VARS[@]}"; do
   if [ -z "${!VAR}" ]; then
-    echo "🚨 ERROR: Required environment variable '$VAR' is missing or empty!"
+    echo "ERROR: Required environment variable '$VAR' is missing or empty!"
     echo "Aborting deployment to prevent downtime."
     exit 1
   fi
 done
 
-echo "✅ All critical variables are present. Proceeding with deployment..."
+docker image prune -af --filter "until=24h"
+
+# Prune stopped containers and unused networks
+docker system prune -f --volumes --filter "until=24h"
+
+echo "All critical variables are present. Proceeding with deployment..."
 
 # 3. Deploy/Update the Swarm stack immediately
 # --resolve-image always forces Swarm to check the registry for a newer :latest tag
-# --with-registry-auth passes your Docker Hub login down to the worker nodes
+# --with-registry-auth passes Docker Hub login down to the worker nodes
 docker stack deploy -c docker-stack.yml minitwit \
   --resolve-image always \
   --with-registry-auth
 
-echo "🚀 Deployment triggered! Swarm is executing a rolling update."
+echo "Deployment triggered! Swarm is executing a rolling update."
