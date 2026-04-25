@@ -1,0 +1,136 @@
+---
+name: Continuous Deployment
+
+on:
+  push:
+    # Run workflow every time something is pushed to the main branch
+    branches:
+      - main
+  # allow manual triggers for now too
+  workflow_dispatch:
+    manual: true
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/web/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/webminitwitimage:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/webminitwitimage:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/webminitwitimage:buildcache,mode=max
+
+      - name: Docker Scout Scan Web Image
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: ${{ secrets.DOCKER_USERNAME }}/webminitwitimage:latest
+          only-severities: critical,high
+          exit-code: true  
+
+      - name: Build and push bot image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./new/bot
+          file: ./new/bot/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/discordbotimage:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/discordbotimage:botbuildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/discordbotimage:botbuildcache,mode=max
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh/
+          echo "$SSH_KEY" > ~/.ssh/ssh_key_golang_minitwit
+          chmod 600 ~/.ssh/ssh_key_golang_minitwit
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+
+      - name: Deploy to server
+        run: |
+          # 1. Create the .env file with ALL required variables
+          echo "DOCKER_USERNAME=$DOCKER_USERNAME" >> .env
+          echo "DISCORD_TOKEN=$DISCORD_TOKEN" >> .env
+          echo "GRAFANA_ADMIN_USER=$GRAFANA_ADMIN_USER" >> .env
+          echo "GRAFANA_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD" >> .env
+          echo "DIGITAL_OCEAN_DATABASE_USERNAME=$DIGITAL_OCEAN_DATABASE_USERNAME" >> .env
+          echo "DIGITAL_OCEAN_DATABASE_PWD=$DIGITAL_OCEAN_DATABASE_PWD" >> .env
+          echo "DIGITAL_OCEAN_DATABASE_NAME=$DIGITAL_OCEAN_DATABASE_NAME" >> .env
+          echo "MONGO_URI='mongodb+srv://${DIGITAL_OCEAN_DATABASE_USERNAME}:${DIGITAL_OCEAN_DATABASE_PWD}@minitwit-dbserver-1-77977c42.mongo.ondigitalocean.com/${DIGITAL_OCEAN_DATABASE_NAME}?tls=true&authSource=admin'" >> .env
+          
+          scp -i ~/.ssh/ssh_key_golang_minitwit -o StrictHostKeyChecking=no -r remote_files/docker-stack.yml remote_files/deploy.sh remote_files/prometheus.yml query-logs.sh monitoring .env $SSH_USER@$SSH_HOST:/minitwit/
+          
+          ssh $SSH_USER@$SSH_HOST -i ~/.ssh/ssh_key_golang_minitwit -o StrictHostKeyChecking=no 'chmod +x /minitwit/deploy.sh && cd /minitwit && ./deploy.sh'
+        # Take github secrets variables so they can be used in  bash script above
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GRAFANA_ADMIN_USER: ${{ secrets.GRAFANA_ADMIN_USER }}
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          DIGITAL_OCEAN_DATABASE_USERNAME: ${{ secrets.DIGITAL_OCEAN_DATABASE_USERNAME }}
+          DIGITAL_OCEAN_DATABASE_PWD: ${{ secrets.DIGITAL_OCEAN_DATABASE_PWD }}
+          DIGITAL_OCEAN_DATABASE_NAME: ${{ secrets.DIGITAL_OCEAN_DATABASE_NAME }}
+
+      - name: Post-deploy TLS verification
+        run: |
+          if [ -z "${TLS_DOMAIN:-}" ]; then
+            echo "TLS_DOMAIN is not set. Skipping post-deploy TLS verification."
+            exit 0
+          fi
+
+          DOMAIN="${TLS_DOMAIN}"
+
+          echo "Running remote Nginx/certificate checks on $SSH_HOST..."
+          ssh $SSH_USER@$SSH_HOST -i ~/.ssh/ssh_key_golang_minitwit -o StrictHostKeyChecking=no '
+            set -e
+            sudo nginx -t
+            sudo systemctl is-active nginx >/dev/null
+            sudo certbot certificates
+          '
+
+          echo "Validating HTTP -> HTTPS redirect for ${DOMAIN}..."
+          HTTP_HEADERS=$(curl -sSI "http://${DOMAIN}")
+          echo "$HTTP_HEADERS"
+          echo "$HTTP_HEADERS" | grep -Ei '^HTTP/.* (301|308)'
+          echo "$HTTP_HEADERS" | grep -Ei '^location: https://'
+
+          echo "Validating HTTPS availability for ${DOMAIN}..."
+          HTTPS_HEADERS=$(curl -sSI "https://${DOMAIN}")
+          echo "$HTTPS_HEADERS"
+          echo "$HTTPS_HEADERS" | grep -Ei '^HTTP/.* (200|301|302)'
+
+          echo "Validating certificate chain for ${DOMAIN}..."
+          CERT_CHECK=$(echo | openssl s_client -connect "${DOMAIN}:443" -servername "${DOMAIN}" 2>/dev/null)
+          echo "$CERT_CHECK" | grep "Verify return code: 0"
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          TLS_DOMAIN: ${{ secrets.TLS_DOMAIN }}

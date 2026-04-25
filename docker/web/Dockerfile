@@ -1,27 +1,41 @@
 # ==========================================
 # STAGE 1: Build the app
 # ==========================================
-FROM golang:1.24 AS builder
+FROM golang:1.25.9 AS builder
 WORKDIR /usr/src/app
 
-# Copy your code into the builder
+# Cache dependencies first (Assuming go.mod is inside 'new/')
+COPY new/go.mod new/go.sum ./
+RUN go mod download
+
+# Now copy the rest of the code
 COPY new/ .
 
 # Build the Go binary securely for Linux
-RUN CGO_ENABLED=0 GOOS=linux go build -o minitwit-server main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o minitwit-server main.go
 
 # ==========================================
-# STAGE 2: Create the tiny production image
+# STAGE 2: Create the production image
 # ==========================================
-FROM alpine:latest
+FROM alpine:3.23
+# Install CA certificates and set up a non-root user
+# hadolint ignore=DL3018
+RUN apk --no-cache add ca-certificates && \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
+
 WORKDIR /usr/src/app
 
-# Copy ONLY the compiled binary from Stage 1
-COPY --from=builder /usr/src/app/minitwit-server .
+RUN mkdir -p /app && chown -R appuser:appgroup /app /usr/src/app
 
-# Copy your static files and templates (adjust paths if they differ)
-COPY --from=builder /usr/src/app/templates/ ./templates/
-COPY --from=builder /usr/src/app/static/ ./static/
+# Change ownership to the non-root user
+COPY --from=builder --chown=appuser:appgroup /usr/src/app/minitwit-server .
+COPY --from=builder --chown=appuser:appgroup /usr/src/app/templates/ ./templates/
+COPY --from=builder --chown=appuser:appgroup /usr/src/app/static/ ./static/
 
-# Run the binary
+# Switch to the non-root user
+USER appuser
+
+# Document the port (Change 8080 to your actual port)
+EXPOSE 8080
+
 CMD [ "./minitwit-server" ]

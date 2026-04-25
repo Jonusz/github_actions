@@ -7,8 +7,9 @@ services:
       - MONGO_INITDB_DATABASE=minitwit
     volumes:
       - mongo_local_data:/data/db
+    networks:
+      - minitwit-network
     healthcheck:
-      # Use the strict array syntax so Docker doesn't fail on the pipe
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
@@ -16,37 +17,119 @@ services:
       start_period: 30s
 
   webserver:
-    build:
-      context: ./new
-      dockerfile: ../docker/web/Dockerfile.dev
-    volumes:
-      - ./new:/app
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-    depends_on:
-      dbserver:
-        condition: service_healthy
+    image: ${DOCKER_USERNAME:-antohay}/webminitwitimage:latest
     ports:
-      # Map host port to container port so you can access it in your browser!
       - "8080:8080"
     environment:
-      # Give the Go app the database hostname so it doesn't crash!
-      - DB_IP=dbserver
+      - MONGO_URI=${MONGO_URI:-mongodb://dbserver:27017/minitwit}
+    networks:
+      - minitwit-network
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080" ]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-      # Give Air 30 seconds to compile your Go code before testing it
       start_period: 30s
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+      
+  prometheus:
+    image: prom/prometheus:latest
+    networks:
+      - minitwit-network
+    volumes:
+      - ./remote_files/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_cloud_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
 
-  clidownload:
-    image: curlimages/curl
-    depends_on:
-      webserver:
-        condition: service_healthy
-    entrypoint: sh -c "curl http://webserver:8080"
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-pass}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-word}
+    networks:
+      - minitwit-network
+    volumes:
+      - grafana_cloud_data:/var/lib/grafana
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
+  loki:
+    image: grafana/loki:latest
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - minitwit-network
+    volumes:
+      - loki_data:/loki
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
+  promtail:
+    image: grafana/promtail:latest
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    configs:
+      - source: promtail_config_v2
+        target: /etc/promtail/config.yml
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - minitwit-network
+    deploy:
+      mode: global
+
+#  discordbot:
+#    image: ${DOCKER_USERNAME}/discordbotimage:latest
+#    environment:
+#      - MONGO_URI=${MONGO_URI}
+#      - DISCORD_TOKEN=${DISCORD_TOKEN}
+#    networks:
+#      - minitwit-network
+#    deploy:
+#      replicas: 1
+#      update_config:
+#        parallelism: 1
+#        order: stop-first
+#      placement:
+#        constraints:
+#          - node.role == manager
+
+networks:
+  minitwit-network:
+    driver: bridge
 
 volumes:
   mongo_local_data:
+
+  prometheus_cloud_data:
+    name: minitwit_prometheus_cloud_data
+
+  grafana_cloud_data:
+    name: minitwit_grafana_cloud_data
+
+  loki_data:
+
+configs:
+  promtail_config_v2:
+    file: ./monitoring/promtail/config.yml
